@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Website Folder → Standalone HTML Converter</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    .box { border: 2px dashed #888; padding: 20px; text-align: center; margin-bottom: 20px; cursor: pointer; }
+    #output { margin-top: 20px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Website Folder → Standalone HTML Converter</h1>
+  <p>Upload your <strong>.zip folder</strong> containing <code>index.html</code>, CSS, JS, images, and fonts.</p>
+
+  <div class="box" id="dropZone">
+    <p>📂 Drag & Drop your .zip here<br>or click to select</p>
+    <input type="file" id="zipInput" accept=".zip" class="hidden"/>
+  </div>
+
+  <div id="output"></div>
+
+  <!-- JSZip -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <script>
+    const dropZone = document.getElementById("dropZone");
+    const fileInput = document.getElementById("zipInput");
+
+    dropZone.addEventListener("click", () => fileInput.click());
+    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.style.background="#f0f0f0"; });
+    dropZone.addEventListener("dragleave", e => { e.preventDefault(); dropZone.style.background=""; });
+    dropZone.addEventListener("drop", e => {
+      e.preventDefault();
+      dropZone.style.background="";
+      if (e.dataTransfer.files.length) processZip(e.dataTransfer.files[0]);
+    });
+
+    fileInput.addEventListener("change", e => {
+      if (e.target.files.length) processZip(e.target.files[0]);
+    });
+
+    async function processZip(file) {
+      document.getElementById("output").innerHTML = "⏳ Processing zip file...";
+      const zip = await JSZip.loadAsync(file);
+      let indexHtml = null;
+      const assets = {};
+
+      for (const [path, entry] of Object.entries(zip.files)) {
+        if (entry.dir) continue;
+        if (path.toLowerCase().endsWith("index.html")) {
+          indexHtml = await entry.async("string");
+        } else if (/\.(png|jpg|jpeg|gif|svg|woff2?|ttf)$/i.test(path)) {
+          assets[path] = await entry.async("base64");
+        } else {
+          assets[path] = await entry.async("string");
+        }
+      }
+
+      if (!indexHtml) {
+        document.getElementById("output").innerHTML = "❌ No index.html found in the zip!";
+        return;
+      }
+
+      let standalone = indexHtml;
+
+      // Inline CSS
+      standalone = await replaceAsync(standalone, /<link[^>]+href="([^"]+)"[^>]*>/g, async (match, href) => {
+        const css = findAsset(href, assets);
+        if (css) return `<style>\n${css}\n</style>`;
+        return await fetchAndInline(href, "css") || match;
+      });
+
+      // Inline JS
+      standalone = await replaceAsync(standalone, /<script[^>]+src="([^"]+)"[^>]*>\s*<\/script>/g, async (match, src) => {
+        const js = findAsset(src, assets);
+        if (js) return `<script>\n${js}\n</script>`;
+        return await fetchAndInline(src, "js") || match;
+      });
+
+      // Inline Images
+      standalone = standalone.replace(/<img[^>]+src="([^"]+)"[^>]*>/g, (match, src) => {
+        const base64 = findAsset(src, assets, true);
+        if (base64) {
+          let mime = "image/png";
+          if (src.endsWith(".jpg") || src.endsWith(".jpeg")) mime = "image/jpeg";
+          if (src.endsWith(".gif")) mime = "image/gif";
+          if (src.endsWith(".svg")) mime = "image/svg+xml";
+          return match.replace(src, `data:${mime};base64,${base64}`);
+        }
+        return match;
+      });
+
+      // Inline Fonts
+      for (const ext of ["woff2","woff","ttf"]) {
+        const regex = new RegExp(`url\\(["']?([^"')]+\\.${ext})["']?\\)`, "g");
+        standalone = await replaceAsync(standalone, regex, async (match, fontPath) => {
+          const base64 = findAsset(fontPath, assets, true);
+          if (base64) {
+            let mime = ext==="ttf" ? "font/ttf" : "font/woff2";
+            return `url(data:${mime};base64,${base64})`;
+          }
+          return await fetchAndInline(fontPath, "font", ext) || match;
+        });
+      }
+
+      // Provide Download
+      const blob = new Blob([standalone], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      document.getElementById("output").innerHTML = `
+        ✅ Conversion complete!<br><br>
+        <a href="${url}" download="standalone.html">⬇ Download standalone.html</a>
+      `;
+    }
+
+    function findAsset(path, assets) {
+      if (assets[path]) return assets[path];
+      const filename = path.split("/").pop();
+      for (const key in assets) {
+        if (key.endsWith(filename)) return assets[key];
+      }
+      return null;
+    }
+
+    async function fetchAndInline(url, type, ext="") {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        if (type==="css" || type==="js") {
+          const text = await res.text();
+          return type==="css" ? `<style>\n${text}\n</style>` : `<script>\n${text}\n</script>`;
+        } else if (type==="font") {
+          const blob = await res.blob();
+          const arrayBuffer = await blob.arrayBuffer();
+          const base64Font = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+          let mime = ext==="ttf" ? "font/ttf" : "font/woff2";
+          return `url(data:${mime};base64,${base64Font})`;
+        }
+      } catch {
+        return null;
+      }
+    }
+
+    async function replaceAsync(str, regex, asyncFn) {
+      const promises = [];
+      str.replace(regex, (match, ...args) => {
+        promises.push(asyncFn(match, ...args));
+        return match;
+      });
+      const data = await Promise.all(promises);
+      return str.replace(regex, () => data.shift());
+    }
+  </script>
+</body>
+</html>
