@@ -5,18 +5,29 @@
   <title>Website Folder → Standalone HTML Converter</title>
   <style>
     body { font-family: Arial, sans-serif; padding: 20px; }
-    .box { border: 2px dashed #888; padding: 20px; text-align: center; margin-bottom: 20px; cursor: pointer; }
-    #output { margin-top: 20px; }
-    .hidden { display: none; }
+    .box {
+      border: 2px dashed #888;
+      padding: 30px;
+      text-align: center;
+      margin-bottom: 20px;
+      cursor: pointer;
+      border-radius: 8px;
+    }
+    .box.dragover { background: #f0f0f0; }
+    #output { margin-top: 20px; font-size: 14px; }
+    input[type=file] { display: none; }
   </style>
 </head>
 <body>
   <h1>Website Folder → Standalone HTML Converter</h1>
-  <p>Upload your <strong>.zip folder</strong> containing <code>index.html</code>, CSS, JS, images, and fonts.</p>
+  <p>Upload your <strong>.zip</strong> or entire folder. It will generate a single <code>standalone.html</code>.</p>
 
   <div class="box" id="dropZone">
-    <p>📂 Drag & Drop your .zip here<br>or click to select</p>
-    <input type="file" id="zipInput" accept=".zip" class="hidden"/>
+    📂 Drag & Drop your ZIP or Folder here<br>
+    <label for="zipInput"><u>Click to upload ZIP</u></label> or 
+    <label for="folderInput"><u>Click to upload Folder</u></label>
+    <input type="file" id="zipInput" accept=".zip" />
+    <input type="file" id="folderInput" webkitdirectory directory multiple />
   </div>
 
   <div id="output"></div>
@@ -26,128 +37,132 @@
 
   <script>
     const dropZone = document.getElementById("dropZone");
-    const fileInput = document.getElementById("zipInput");
+    const zipInput = document.getElementById("zipInput");
+    const folderInput = document.getElementById("folderInput");
+    const output = document.getElementById("output");
 
-    dropZone.addEventListener("click", () => fileInput.click());
-    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.style.background="#f0f0f0"; });
-    dropZone.addEventListener("dragleave", e => { e.preventDefault(); dropZone.style.background=""; });
+    // Drag & Drop
+    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+    dropZone.addEventListener("dragleave", e => { e.preventDefault(); dropZone.classList.remove("dragover"); });
     dropZone.addEventListener("drop", e => {
       e.preventDefault();
-      dropZone.style.background="";
-      if (e.dataTransfer.files.length) processZip(e.dataTransfer.files[0]);
+      dropZone.classList.remove("dragover");
+      const file = e.dataTransfer.files[0];
+      if (file && file.name.endsWith(".zip")) {
+        processZip(file);
+      } else {
+        processFolder(e.dataTransfer.files);
+      }
     });
 
-    fileInput.addEventListener("change", e => {
+    zipInput.addEventListener("change", e => {
       if (e.target.files.length) processZip(e.target.files[0]);
     });
 
+    folderInput.addEventListener("change", e => {
+      if (e.target.files.length) processFolder(e.target.files);
+    });
+
+    // --- Handle ZIP ---
     async function processZip(file) {
-      document.getElementById("output").innerHTML = "⏳ Processing zip file...";
+      output.innerHTML = "⏳ Processing zip...";
       const zip = await JSZip.loadAsync(file);
-      let indexHtml = null;
       const assets = {};
+      let indexHtml = null;
 
       for (const [path, entry] of Object.entries(zip.files)) {
         if (entry.dir) continue;
         if (path.toLowerCase().endsWith("index.html")) {
           indexHtml = await entry.async("string");
-        } else if (/\.(png|jpg|jpeg|gif|svg|woff2?|ttf)$/i.test(path)) {
+        } else if (/\.(png|jpe?g|gif|svg|woff2?|ttf)$/i.test(path)) {
           assets[path] = await entry.async("base64");
         } else {
           assets[path] = await entry.async("string");
         }
       }
+      if (!indexHtml) { output.innerHTML = "❌ No index.html found"; return; }
+      makeStandalone(indexHtml, assets);
+    }
 
-      if (!indexHtml) {
-        document.getElementById("output").innerHTML = "❌ No index.html found in the zip!";
-        return;
+    // --- Handle Folder ---
+    async function processFolder(fileList) {
+      output.innerHTML = "⏳ Processing folder...";
+      const assets = {};
+      let indexHtml = null;
+
+      for (const file of fileList) {
+        const path = file.webkitRelativePath || file.name;
+        const ext = path.split(".").pop().toLowerCase();
+        if (ext === "html" && path.toLowerCase().includes("index")) {
+          indexHtml = await file.text();
+        } else if (["png","jpg","jpeg","gif","svg","woff","woff2","ttf"].includes(ext)) {
+          const buffer = await file.arrayBuffer();
+          assets[path] = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+        } else {
+          assets[path] = await file.text();
+        }
       }
+      if (!indexHtml) { output.innerHTML = "❌ No index.html found"; return; }
+      makeStandalone(indexHtml, assets);
+    }
 
+    // --- Merge into Standalone ---
+    async function makeStandalone(indexHtml, assets) {
       let standalone = indexHtml;
 
       // Inline CSS
-      standalone = await replaceAsync(standalone, /<link[^>]+href="([^"]+)"[^>]*>/g, async (match, href) => {
+      standalone = await replaceAsync(standalone, /<link[^>]+href="([^"]+)"[^>]*>/g, async (m, href) => {
         const css = findAsset(href, assets);
-        if (css) return `<style>\n${css}\n</style>`;
-        return await fetchAndInline(href, "css") || match;
+        return css ? `<style>\n${css}\n</style>` : m;
       });
 
       // Inline JS
-      standalone = await replaceAsync(standalone, /<script[^>]+src="([^"]+)"[^>]*>\s*<\/script>/g, async (match, src) => {
+      standalone = await replaceAsync(standalone, /<script[^>]+src="([^"]+)"[^>]*>\s*<\/script>/g, async (m, src) => {
         const js = findAsset(src, assets);
-        if (js) return `<script>\n${js}\n</script>`;
-        return await fetchAndInline(src, "js") || match;
+        return js ? `<script>\n${js}\n</script>` : m;
       });
 
       // Inline Images
-      standalone = standalone.replace(/<img[^>]+src="([^"]+)"[^>]*>/g, (match, src) => {
+      standalone = standalone.replace(/<img[^>]+src="([^"]+)"[^>]*>/g, (m, src) => {
         const base64 = findAsset(src, assets, true);
         if (base64) {
           let mime = "image/png";
           if (src.endsWith(".jpg") || src.endsWith(".jpeg")) mime = "image/jpeg";
           if (src.endsWith(".gif")) mime = "image/gif";
           if (src.endsWith(".svg")) mime = "image/svg+xml";
-          return match.replace(src, `data:${mime};base64,${base64}`);
+          return m.replace(src, `data:${mime};base64,${base64}`);
         }
-        return match;
+        return m;
       });
 
       // Inline Fonts
       for (const ext of ["woff2","woff","ttf"]) {
         const regex = new RegExp(`url\\(["']?([^"')]+\\.${ext})["']?\\)`, "g");
-        standalone = await replaceAsync(standalone, regex, async (match, fontPath) => {
+        standalone = standalone.replace(regex, (m, fontPath) => {
           const base64 = findAsset(fontPath, assets, true);
           if (base64) {
-            let mime = ext==="ttf" ? "font/ttf" : "font/woff2";
+            let mime = ext === "ttf" ? "font/ttf" : "font/woff2";
             return `url(data:${mime};base64,${base64})`;
           }
-          return await fetchAndInline(fontPath, "font", ext) || match;
+          return m;
         });
       }
 
-      // Provide Download
       const blob = new Blob([standalone], { type: "text/html" });
       const url = URL.createObjectURL(blob);
-      document.getElementById("output").innerHTML = `
-        ✅ Conversion complete!<br><br>
-        <a href="${url}" download="standalone.html">⬇ Download standalone.html</a>
-      `;
+      output.innerHTML = `✅ Done! <a href="${url}" download="standalone.html">⬇ Download standalone.html</a>`;
     }
 
+    // Helpers
     function findAsset(path, assets) {
       if (assets[path]) return assets[path];
-      const filename = path.split("/").pop();
-      for (const key in assets) {
-        if (key.endsWith(filename)) return assets[key];
-      }
+      const file = path.split("/").pop();
+      for (const key in assets) if (key.endsWith(file)) return assets[key];
       return null;
     }
-
-    async function fetchAndInline(url, type, ext="") {
-      try {
-        const res = await fetch(url);
-        if (!res.ok) return null;
-        if (type==="css" || type==="js") {
-          const text = await res.text();
-          return type==="css" ? `<style>\n${text}\n</style>` : `<script>\n${text}\n</script>`;
-        } else if (type==="font") {
-          const blob = await res.blob();
-          const arrayBuffer = await blob.arrayBuffer();
-          const base64Font = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-          let mime = ext==="ttf" ? "font/ttf" : "font/woff2";
-          return `url(data:${mime};base64,${base64Font})`;
-        }
-      } catch {
-        return null;
-      }
-    }
-
     async function replaceAsync(str, regex, asyncFn) {
       const promises = [];
-      str.replace(regex, (match, ...args) => {
-        promises.push(asyncFn(match, ...args));
-        return match;
-      });
+      str.replace(regex, (m, ...args) => { promises.push(asyncFn(m, ...args)); return m; });
       const data = await Promise.all(promises);
       return str.replace(regex, () => data.shift());
     }
